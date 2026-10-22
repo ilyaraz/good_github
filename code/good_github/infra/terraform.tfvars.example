@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars before the first site apply.
+# Change to true after the first upload, and keep it true for subsequent applies.
+publish_dns = false

@@ -1,0 +1,15 @@
+/dist/
+/.venv/
+__pycache__/
+
+# Terraform's lock files are committed; state, local settings, and plans are not.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+/infra/bootstrap/backend.tf
+/infra/deployment.json
+crash.log
+crash.*.log

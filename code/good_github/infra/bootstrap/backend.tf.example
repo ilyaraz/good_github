@@ -1,0 +1,11 @@
+# Copy to backend.tf ONLY after bootstrap's first apply creates this bucket.
+# Then run terraform init -migrate-state in this directory.
+terraform {
+  backend "s3" {
+    bucket       = "ilyaraz-good-github-tfstate"
+    key          = "foundation/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

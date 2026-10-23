@@ -1,13 +1,15 @@
 from html.parser import HTMLParser
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from urllib.parse import unquote, urlsplit
 from urllib.robotparser import RobotFileParser
 from xml.etree import ElementTree
 
-from build_site import ROOT, build, read_clusters, read_repository_stars, render_report, repository_key
+from build_site import (ROOT, Category, build, read_clusters, read_repository_stars, render_report,
+                        mid_sentence, report_description, report_facts, repository_key)
 
 
 class Links(HTMLParser):
@@ -39,6 +41,10 @@ class Links(HTMLParser):
             self.current_cluster = None
 
 
+def structured_data(source):
+    return json.loads(re.search(r'<script type="application/ld\+json">(.*?)</script>', source)[1])
+
+
 class BuildSiteTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -68,8 +74,8 @@ class BuildSiteTests(unittest.TestCase):
         self.assertEqual(self.build(self.clusters, self.reports, self.output), (3, 1))
         home = Links((self.output / "index.html").read_text())
         self.assertEqual(home.clusters, {
-            "cluster-networking": {"open": False, "hrefs": ["reports/http-clients.html", "reports/empty-report.html"]},
-            "cluster-other-systems": {"open": False, "hrefs": ["reports/missing-report.html"]},
+            "cluster-networking": {"open": False, "hrefs": ["reports/http-clients.html", "reports/empty-report.html", "clusters/networking.html"]},
+            "cluster-other-systems": {"open": False, "hrefs": ["reports/missing-report.html", "clusters/other-systems.html"]},
         })
         for slug in ("http-clients", "empty-report", "missing-report"):
             self.assertIn(f"reports/{slug}.html", home.hrefs)
@@ -84,11 +90,39 @@ class BuildSiteTests(unittest.TestCase):
         self.assertIn('href="https://github.com/curl/curl">curl/curl</a> <span class="repo-stars">(12,345 ⭐)</span>', report)
         self.assertEqual(report.count('class="repo-stars"'), 1)
         self.assertTrue((self.output / "assets/styles.css").is_file())
+        self.assertTrue((self.output / "assets/favicon.svg").is_file())
         for slug in ("empty-report", "missing-report"):
-            self.assertIn("Report pending", (self.output / f"reports/{slug}.html").read_text())
+            pending = (self.output / f"reports/{slug}.html").read_text()
+            self.assertIn("Report pending", pending)
+            self.assertIn('<meta name="robots" content="noindex">', pending)
+        self.assertNotIn("noindex", report)
+        self.assertIn('<link rel="canonical" href="https://goodgithub.com/reports/http-clients.html">', report)
+        self.assertIn("<title>HTTP clients: 1 Open-Source Repo to Study · Good GitHub</title>", report)
+        self.assertIn('href="../clusters/networking.html"', report)
+        self.assertNotIn('href="../reports/empty-report.html"', report)
+        graph = {item["@type"]: item for item in structured_data(report)["@graph"]}
+        self.assertEqual(graph["ItemList"]["itemListElement"], [{"@type": "ListItem", "position": 1, "name": "curl/curl", "url": "https://github.com/curl/curl"}])
+        self.assertEqual([item["name"] for item in graph["BreadcrumbList"]["itemListElement"]], ["Home", "Networking", "HTTP clients"])
+        cluster = (self.output / "clusters/networking.html").read_text()
+        self.assertEqual(Links(cluster).headings, 1)
+        self.assertIn('href="../reports/http-clients.html"', cluster)
+        self.assertNotIn('href="../reports/empty-report.html"', cluster)
+        self.assertEqual(structured_data(cluster)["@graph"][0]["@type"], "CollectionPage")
+        home_source = (self.output / "index.html").read_text()
+        self.assertIn('<link rel="canonical" href="https://goodgithub.com/">', home_source)
+        self.assertEqual(structured_data(home_source)["@type"], "WebSite")
+        not_found = (self.output / "404.html").read_text()
+        self.assertIn('<meta name="robots" content="noindex">', not_found)
+        self.assertIn('href="/assets/styles.css"', not_found)
+        self.assertNotIn("canonical", not_found)
         sitemap = ElementTree.parse(self.output / "sitemap.xml")
         urls = [element.text for element in sitemap.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}url/{http://www.sitemaps.org/schemas/sitemap/0.9}loc")]
-        self.assertEqual(urls, ["https://goodgithub.com/", "https://goodgithub.com/reports/http-clients.html"])
+        self.assertEqual(urls, [
+            "https://goodgithub.com/",
+            "https://goodgithub.com/clusters/networking.html",
+            "https://goodgithub.com/reports/http-clients.html",
+            "https://goodgithub.com/clusters/other-systems.html",
+        ])
         robots = RobotFileParser()
         robots.parse((self.output / "robots.txt").read_text().splitlines())
         self.assertEqual(robots.site_maps(), ["https://goodgithub.com/sitemap.xml"])
@@ -104,7 +138,8 @@ class BuildSiteTests(unittest.TestCase):
         (self.reports / "http-clients.md").write_text("")
         self.build(self.clusters, self.reports, self.output)
         sitemap = ElementTree.parse(self.output / "sitemap.xml")
-        self.assertEqual([element.text for element in sitemap.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")], ["https://goodgithub.com/"])
+        self.assertEqual([element.text for element in sitemap.findall(".//{http://www.sitemaps.org/schemas/sitemap/0.9}loc")],
+                         ["https://goodgithub.com/", "https://goodgithub.com/clusters/networking.html"])
 
     def test_invalid_input_preserves_previous_build(self):
         self.build(self.clusters, self.reports, self.output)
@@ -156,7 +191,7 @@ class BuildSiteTests(unittest.TestCase):
         self.build(self.clusters, self.reports, self.output)
         home = Links((self.output / "index.html").read_text())
         self.assertEqual(list(home.clusters), ["cluster-zeta-cluster", "cluster-alpha-cluster"])
-        self.assertEqual(home.clusters["cluster-zeta-cluster"]["hrefs"], ["reports/zebra.html", "reports/alpha.html"])
+        self.assertEqual(home.clusters["cluster-zeta-cluster"]["hrefs"], ["reports/zebra.html", "reports/alpha.html", "clusters/zeta-cluster.html"])
 
     def test_malformed_clusters_fail_with_useful_errors(self):
         cases = [
@@ -208,6 +243,53 @@ class BuildSiteTests(unittest.TestCase):
             with self.subTest(url=url):
                 self.assertIsNone(repository_key(url))
 
+    def test_report_facts_feed_titles_descriptions_and_sitemap(self):
+        source = (
+            "# Stores\n\nResearch date: **2026-10-09**.\n\n## Group\n\n"
+            "### 1. [kurrent-io/KurrentDB](https://github.com/kurrent-io/KurrentDB)\n\n"
+            "### 2. [**sierra-db/sierradb**](https://github.com/sierra-db/sierradb)\n\n"
+            "### 3. [Duplicate](https://github.com/kurrent-io/kurrentdb/)\n\n"
+            "### [Docs](https://example.com/docs)\n\n"
+            "#### 4. [nested/repo](https://github.com/nested/repo)\n\n"
+            "### 4. [umadb-io/umadb](https://github.com/umadb-io/umadb)\n"
+        )
+        research_date, repositories = report_facts(source)
+        self.assertEqual(research_date, "2026-10-09")
+        self.assertEqual([label for label, _ in repositories], ["kurrent-io/KurrentDB", "sierra-db/sierradb", "umadb-io/umadb"])
+        self.assertEqual(report_facts("Research date: 2026-13-45\n")[0], None)
+        category = Category("Append-only event stores", "append-only-event-stores", source, research_date, repositories)
+        self.assertEqual(report_description(category),
+                         "3 open-source append-only event stores worth studying, including KurrentDB, sierradb and umadb. "
+                         "Design decisions, trade-offs and where to start reading the code.")
+        self.assertTrue(report_description(Category("HTTP clients", "http-clients", "x")).startswith("A reading guide to open-source HTTP clients:"))
+        self.assertEqual(mid_sentence("Databases and Search, WebAssembly, Fourier, TCP/IP, Computer-Aided"),
+                         "databases and search, WebAssembly, Fourier, TCP/IP, computer-aided")
+        generic = Category("Relational database servers", "relational-database-servers", "x", None,
+                           [("postgres/postgres", "https://github.com/postgres/postgres"), ("MariaDB/server", "https://github.com/MariaDB/server")])
+        self.assertIn("including postgres and MariaDB/server.", report_description(generic))
+        (self.reports / "http-clients.md").write_text(source, encoding="utf-8")
+        self.build(self.clusters, self.reports, self.output)
+        sitemap = ElementTree.parse(self.output / "sitemap.xml")
+        namespace = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+        modified = {entry.find(f"{namespace}loc").text: getattr(entry.find(f"{namespace}lastmod"), "text", None)
+                    for entry in sitemap.findall(f"{namespace}url")}
+        self.assertEqual(modified, {
+            "https://goodgithub.com/": "2026-10-09",
+            "https://goodgithub.com/clusters/networking.html": "2026-10-09",
+            "https://goodgithub.com/reports/http-clients.html": "2026-10-09",
+            "https://goodgithub.com/clusters/other-systems.html": None,
+        })
+        article = structured_data((self.output / "reports/http-clients.html").read_text())["@graph"][0]
+        self.assertEqual((article["datePublished"], article["dateModified"]), ("2026-10-09", "2026-10-09"))
+
+    def test_structured_data_cannot_close_its_script(self):
+        self.clusters.write_text("## Networking\n- HTTP </script><b> clients\n")
+        (self.reports / "http-script-b-clients.md").write_text("Intro\n")
+        self.build(self.clusters, self.reports, self.output)
+        report = (self.output / "reports/http-script-b-clients.html").read_text()
+        self.assertEqual(report.count("</script>"), 3)
+        self.assertEqual(structured_data(report)["@graph"][0]["headline"], "HTTP </script><b> clients")
+
     def test_invalid_metadata_preserves_previous_build(self):
         self.build(self.clusters, self.reports, self.output)
         original = (self.output / "reports/http-clients.html").read_bytes()
@@ -233,13 +315,13 @@ class BuildSiteTests(unittest.TestCase):
             path: Links(path.read_text(encoding="utf-8"))
             for path in self.output.rglob("*.html")
         }
-        self.assertEqual(len(pages), len(categories) + 1)
+        self.assertEqual(len(pages), len(categories) + len(clusters) + 2)
         home = pages[self.output / "index.html"]
         self.assertEqual(len(home.clusters), len(clusters))
         for cluster in clusters:
             rendered = home.clusters[f"cluster-{cluster.slug}"]
             self.assertFalse(rendered["open"])
-            self.assertEqual(rendered["hrefs"], [f"reports/{category.slug}.html" for category in cluster.categories])
+            self.assertEqual(rendered["hrefs"], [f"reports/{category.slug}.html" for category in cluster.categories] + [f"clusters/{cluster.slug}.html"])
         for path, page in pages.items():
             self.assertEqual(page.headings, 1, path)
             self.assertEqual(len(page.ids), len(set(page.ids)), path)
@@ -247,7 +329,8 @@ class BuildSiteTests(unittest.TestCase):
                 url = urlsplit(href)
                 if url.scheme or url.netloc:
                     continue
-                target = (path.parent / unquote(url.path)).resolve() if url.path else path
+                base = self.output if url.path.startswith("/") else path.parent
+                target = (base / unquote(url.path).lstrip("/")).resolve() if url.path else path
                 self.assertTrue(target.exists(), f"{path.name}: {href}")
                 if url.fragment:
                     self.assertIn(unquote(url.fragment), pages[target].ids, f"{path.name}: {href}")

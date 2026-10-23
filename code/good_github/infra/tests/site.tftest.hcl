@@ -92,6 +92,34 @@ run "private_site_before_dns_cutover" {
 
   assert {
     condition = (
+      one(aws_cloudfront_distribution.site.default_cache_behavior[0].function_association).event_type == "viewer-request" &&
+      aws_cloudfront_function.canonical_host.publish &&
+      strcontains(aws_cloudfront_function.canonical_host.code, "\"www.goodgithub.com\"") &&
+      strcontains(aws_cloudfront_function.canonical_host.code, "statusCode: 301") &&
+      strcontains(aws_cloudfront_function.canonical_host.code, "\"https://goodgithub.com\" + request.uri")
+    )
+    error_message = "Requests for www.goodgithub.com must be permanently redirected to the apex host."
+  }
+
+  assert {
+    condition = (
+      length(aws_cloudfront_distribution.site.custom_error_response) == 2 &&
+      alltrue([for response in aws_cloudfront_distribution.site.custom_error_response :
+        response.response_code == 404 && response.response_page_path == "/404.html"])
+    )
+    error_message = "Missing pages must return the generated 404 page with a 404 status."
+  }
+
+  assert {
+    condition = (
+      contains(jsondecode(aws_iam_policy.publisher.policy).Statement[1].Resource, "arn:aws:s3:::ilyaraz-good-github/404.html") &&
+      contains(jsondecode(aws_iam_policy.publisher.policy).Statement[1].Resource, "arn:aws:s3:::ilyaraz-good-github/clusters/*")
+    )
+    error_message = "The publisher must be able to upload the 404 page and cluster pages."
+  }
+
+  assert {
+    condition = (
       aws_cloudfront_distribution.site.aliases == toset(["goodgithub.com", "www.goodgithub.com"]) &&
       aws_acm_certificate.site.validation_method == "DNS" &&
       length(aws_route53_record.certificate_validation) == 2 &&

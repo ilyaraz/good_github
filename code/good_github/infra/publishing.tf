@@ -18,10 +18,12 @@ resource "aws_iam_policy" "publisher" {
         Action = ["s3:GetObject", "s3:PutObject"]
         Resource = [
           "${aws_s3_bucket.site.arn}/index.html",
+          "${aws_s3_bucket.site.arn}/404.html",
           "${aws_s3_bucket.site.arn}/sitemap.xml",
           "${aws_s3_bucket.site.arn}/robots.txt",
           "${aws_s3_bucket.site.arn}/assets/*",
-          "${aws_s3_bucket.site.arn}/reports/*"
+          "${aws_s3_bucket.site.arn}/reports/*",
+          "${aws_s3_bucket.site.arn}/clusters/*"
         ]
       },
       {

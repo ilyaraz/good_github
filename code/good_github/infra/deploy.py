@@ -13,7 +13,13 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE_CONTROL = "public,max-age=0,s-maxage=3600,must-revalidate"
+ASSET_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
+PAGE_DIRECTORIES = ("reports", "clusters")
 ROOT_FILES = (
+    ("404.html", "text/html; charset=utf-8"),
     ("sitemap.xml", "application/xml; charset=utf-8"),
     ("robots.txt", "text/plain; charset=utf-8"),
     ("index.html", "text/html; charset=utf-8"),
@@ -48,6 +54,7 @@ def verify(base_url, report_path):
     for path, expected_type in (
         ("/", "text/html"),
         ("/assets/styles.css", "text/css"),
+        ("/assets/favicon.svg", "image/svg+xml"),
         ("/" + report_path, "text/html"),
         ("/sitemap.xml", "application/xml"),
         ("/robots.txt", "text/plain"),
@@ -72,18 +79,26 @@ def main():
         run("uv", "run", "build_site.py")
         dist = ROOT / "dist"
         reports = sorted((dist / "reports").glob("*.html"))
-        required_files = [filename for filename, _ in ROOT_FILES] + ["assets/styles.css"]
-        if not reports or not all((dist / filename).is_file() for filename in required_files):
-            raise ValueError("Build did not produce the expected HTML, CSS, sitemap.xml, and robots.txt files.")
+        assets = sorted(path for path in (dist / "assets").iterdir() if path.is_file()) if (dist / "assets").is_dir() else []
+        required_files = [filename for filename, _ in ROOT_FILES] + ["assets/styles.css", "assets/favicon.svg"]
+        if (not reports or not any((dist / "clusters").glob("*.html"))
+                or not all((dist / filename).is_file() for filename in required_files)):
+            raise ValueError("Build did not produce the expected HTML, CSS, favicon, 404.html, sitemap.xml, and robots.txt files.")
+        unknown = [path.name for path in assets if path.suffix not in ASSET_TYPES]
+        if unknown:
+            raise ValueError(f"No content type configured for assets: {', '.join(unknown)}")
 
         aws = ["aws", "--region", config["region"], "--no-cli-pager"]
         destination = f"s3://{config['bucket']}"
         # Re-upload these small files to update both content and cache metadata.
         # Do not delete old report URLs while browsers might still have older links.
-        for directory, content_type in (("assets", "text/css; charset=utf-8"), ("reports", "text/html; charset=utf-8")):
+        for asset in assets:
+            run(*aws, "s3", "cp", asset, f"{destination}/assets/{asset.name}",
+                "--only-show-errors", "--content-type", ASSET_TYPES[asset.suffix], "--cache-control", CACHE_CONTROL)
+        for directory in PAGE_DIRECTORIES:
             run(*aws, "s3", "cp", dist / directory, f"{destination}/{directory}/",
                 "--recursive", "--no-follow-symlinks", "--only-show-errors",
-                "--content-type", content_type, "--cache-control", CACHE_CONTROL)
+                "--content-type", "text/html; charset=utf-8", "--cache-control", CACHE_CONTROL)
         for filename, content_type in ROOT_FILES:
             run(*aws, "s3", "cp", dist / filename, f"{destination}/{filename}",
                 "--only-show-errors", "--content-type", content_type, "--cache-control", CACHE_CONTROL)

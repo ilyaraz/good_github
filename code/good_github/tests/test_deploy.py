@@ -23,7 +23,8 @@ class DeploymentTests(unittest.TestCase):
             "website_url": "https://goodgithub.com",
         }
         self.config.write_text(json.dumps(self.settings))
-        for filename in ("index.html", "assets/styles.css", "reports/example.html", "sitemap.xml", "robots.txt", ".good-github-site"):
+        for filename in ("index.html", "404.html", "assets/styles.css", "assets/favicon.svg", "reports/example.html",
+                         "clusters/example.html", "sitemap.xml", "robots.txt", ".good-github-site"):
             path = self.root / "dist" / filename
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("example")
@@ -44,10 +45,18 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("unittest", commands[0])
         self.assertEqual(commands[1], ("uv", "run", "build_site.py"))
         uploads = [command for command in commands if "cp" in command]
-        self.assertEqual(len(uploads), 5)
-        for command, filename, content_type in zip(uploads,
-                ("assets", "reports", "sitemap.xml", "robots.txt", "index.html"),
-                ("text/css; charset=utf-8", "text/html; charset=utf-8", "application/xml; charset=utf-8", "text/plain; charset=utf-8", "text/html; charset=utf-8")):
+        expected = (
+            ("assets/favicon.svg", "image/svg+xml"),
+            ("assets/styles.css", "text/css; charset=utf-8"),
+            ("reports", "text/html; charset=utf-8"),
+            ("clusters", "text/html; charset=utf-8"),
+            ("404.html", "text/html; charset=utf-8"),
+            ("sitemap.xml", "application/xml; charset=utf-8"),
+            ("robots.txt", "text/plain; charset=utf-8"),
+            ("index.html", "text/html; charset=utf-8"),
+        )
+        self.assertEqual(len(uploads), len(expected))
+        for command, (filename, content_type) in zip(uploads, expected):
             self.assertIn(self.root / "dist" / filename, command)
             self.assertIn("us-east-1", command)
             self.assertIn(deploy.CACHE_CONTROL, command)
@@ -58,6 +67,16 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("invalidation-completed", commands[-1])
         self.assertIn("IEXAMPLE123", commands[-1])
         verify.assert_called_once_with(self.settings["cloudfront_url"], "reports/example.html")
+
+    def test_unknown_asset_type_stops_before_upload(self):
+        (self.root / "dist/assets/logo.png").write_text("example")
+        with patch.object(deploy, "ROOT", self.root), \
+             patch.object(deploy.sys, "argv", ["deploy.py", "--config", str(self.config)]), \
+             patch.object(deploy, "run") as run, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(deploy.main(), 1)
+        self.assertIn("logo.png", errors.getvalue())
+        self.assertFalse(any("cp" in entry.args for entry in run.call_args_list))
 
     def test_wrong_target_stops_before_build_or_aws_commands(self):
         self.settings["bucket"] = "another-bucket"

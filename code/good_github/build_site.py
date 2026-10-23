@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 from html import escape
 import json
 from pathlib import Path
@@ -34,6 +35,11 @@ MARKER = ".good-github-site"
 MARKER_CONTENT = "good-github-static-site-v1\n"
 SITE_URL = "https://goodgithub.com"
 GOOGLE_ANALYTICS_ID = "G-SLF19PMTRF"
+SITE_NAME = "Good GitHub"
+HOME_TITLE = "Good GitHub: Open-Source Codebases Worth Reading, by Topic"
+RESEARCH_DATE = re.compile(r"^Research date:\s*\**(\d{4}-\d{2}-\d{2})\b", re.M)
+# Report entries are H3 headings such as "### 1. [owner/repo](https://github.com/owner/repo)".
+REPOSITORY_HEADING = re.compile(r"^###\s+(?:\d+[.)]\s+)?[^\n\[]*\[([^\]\n]+)\]\(([^)\s]+)\)", re.M)
 
 
 @dataclass
@@ -41,6 +47,8 @@ class Category:
     name: str
     slug: str
     content: str | None
+    research_date: str | None = None
+    repositories: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -54,6 +62,35 @@ def slugify(value: str) -> str:
     """Match the report filenames: lowercase words separated by hyphens."""
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+PROPER_NOUNS = {"Fourier", "Unicode"}
+# Repository names that say little without their owner, such as MariaDB/server.
+GENERIC_REPOSITORY_NAMES = {"app", "core", "engine", "lib", "main", "plot", "runtime", "sdk", "server", "src", "text", "view"}
+
+
+def mid_sentence(value: str) -> str:
+    """Lowercase capitalized words for use mid-sentence, keeping acronyms such as "HTTP" and "WebAssembly"."""
+    return re.sub(r"\b[A-Z][a-z]+\b", lambda word: word[0] if word[0] in PROPER_NOUNS else word[0].lower(), value)
+
+
+def report_facts(content: str) -> tuple[str | None, list[tuple[str, str]]]:
+    """Find the research date and the featured repositories (label, URL) in a report."""
+    match = RESEARCH_DATE.search(content)
+    research_date = None
+    if match:
+        try:
+            research_date = date.fromisoformat(match[1]).isoformat()
+        except ValueError:
+            pass
+    repositories = []
+    seen = set()
+    for label, url in REPOSITORY_HEADING.findall(content):
+        key = repository_key(url)
+        if key is not None and key not in seen:
+            seen.add(key)
+            repositories.append((re.sub(r"[*`]", "", label).strip() or key, url))
+    return research_date, repositories
 
 
 def read_clusters(clusters_path: Path, reports_dir: Path) -> list[Cluster]:
@@ -91,7 +128,10 @@ def read_clusters(clusters_path: Path, reports_dir: Path) -> list[Cluster]:
         seen_categories[slug] = name
         report = reports_dir / f"{slug}.md"
         content = report.read_text(encoding="utf-8-sig") if report.exists() else None
-        clusters[-1].categories.append(Category(name, slug, content if content and content.strip() else None))
+        category = Category(name, slug, content if content and content.strip() else None)
+        if category.content is not None:
+            category.research_date, category.repositories = report_facts(category.content)
+        clusters[-1].categories.append(category)
     if not clusters:
         raise ValueError(f"No clusters found in {clusters_path}")
     for cluster in clusters:
@@ -160,7 +200,7 @@ def render_report(source: str, repository_stars: dict[str, int] | None = None) -
     if tokens and tokens[0].type == "heading_open" and tokens[0].tag == "h1":
         tokens = tokens[3:]
     sections = []
-    used_ids = {"top", "main-content", "report-title"}
+    used_ids = {"top", "main-content", "report-title", "related-title"}
     for index, token in enumerate(tokens):
         if token.type not in {"heading_open", "heading_close"}:
             continue
@@ -197,8 +237,32 @@ def render_report(source: str, repository_stars: dict[str, int] | None = None) -
     return markdown.renderer.render(tokens, markdown.options, {}), sections
 
 
-def page(title: str, description: str, body: str, *, report: bool = False) -> str:
-    prefix = "../" if report else ""
+def json_ld(data: dict) -> str:
+    # Escape "<" so report text can never close the script element.
+    source = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+    return f'<script type="application/ld+json">{source}</script>'
+
+
+def page(title: str, description: str, body: str, *, prefix: str = "", path: str | None = None,
+         page_type: str = "website", structured_data: dict | None = None, indexable: bool = True) -> str:
+    """Wrap a page body. `path` is the canonical URL path; pages without one are not shared or indexed."""
+    head = [f'<meta name="description" content="{escape(description, quote=True)}">']
+    if not indexable:
+        head.append('<meta name="robots" content="noindex">')
+    if path is not None:
+        url = escape(f"{SITE_URL}/{path}", quote=True)
+        head += [
+            f'<link rel="canonical" href="{url}">',
+            f'<meta property="og:site_name" content="{SITE_NAME}">',
+            f'<meta property="og:type" content="{page_type}">',
+            f'<meta property="og:title" content="{escape(title, quote=True)}">',
+            f'<meta property="og:description" content="{escape(description, quote=True)}">',
+            f'<meta property="og:url" content="{url}">',
+            '<meta name="twitter:card" content="summary">',
+        ]
+    if structured_data is not None:
+        head.append(json_ld(structured_data))
+    head_tags = "\n  ".join(head)
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -212,9 +276,10 @@ def page(title: str, description: str, body: str, *, report: bool = False) -> st
   </script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="{escape(description, quote=True)}">
+  <title>{escape(title)}</title>
+  {head_tags}
   <meta name="color-scheme" content="light">
-  <title>{escape(title)} · Good GitHub</title>
+  <link rel="icon" href="{prefix}assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="{prefix}assets/styles.css">
 </head>
 <body id="top">
@@ -230,19 +295,64 @@ def page(title: str, description: str, body: str, *, report: bool = False) -> st
 '''
 
 
+def publisher() -> dict:
+    return {"@type": "Organization", "name": SITE_NAME, "url": f"{SITE_URL}/"}
+
+
+def breadcrumbs(trail: list[tuple[str, str | None]], prefix: str) -> tuple[str, dict]:
+    """Render a visible breadcrumb trail and its schema.org equivalent; the last item is the current page."""
+    items = []
+    schema = []
+    for position, (name, path) in enumerate(trail, 1):
+        if position == len(trail):
+            items.append(f'<li aria-current="page">{escape(name)}</li>')
+        else:
+            items.append(f'<li><a href="{prefix}{path or "index.html"}">{escape(name)}</a></li>')
+        schema.append({"@type": "ListItem", "position": position, "name": name, "item": f"{SITE_URL}/{path or ''}"})
+    html = f'<nav class="breadcrumbs" aria-label="Breadcrumb"><ol>{"".join(items)}</ol></nav>'
+    return html, {"@type": "BreadcrumbList", "itemListElement": schema}
+
+
+def report_title(category: Category) -> str:
+    count = len(category.repositories)
+    noun = "Repo" if count == 1 else "Repos"
+    return f"{category.name}: {count} Open-Source {noun} to Study" if count else category.name
+
+
+def report_description(category: Category) -> str:
+    topic = mid_sentence(category.name)
+    if not category.repositories:
+        return f"A reading guide to open-source {topic}: the design decisions worth studying and where to start reading the code."
+    names = [label if label.split("/")[-1].lower() in GENERIC_REPOSITORY_NAMES else label.split("/")[-1]
+             for label, _ in category.repositories[:3]]
+    listed = ", ".join(names[:-1]) + f" and {names[-1]}" if len(names) > 1 else names[0]
+    return (f"{len(category.repositories)} open-source {topic} worth studying, including {listed}. "
+            "Design decisions, trade-offs and where to start reading the code.")
+
+
+def cluster_description(cluster: Cluster) -> str:
+    ready = [category for category in cluster.categories if category.content is not None]
+    examples = ", ".join(mid_sentence(category.name) for category in ready[:3])
+    noun = "guide" if len(ready) == 1 else "guides"
+    return (f"{len(ready)} reading {noun} to open-source {mid_sentence(cluster.name)} on GitHub"
+            + (f", covering {examples} and more." if examples else "."))
+
+
+def report_link(category: Category, prefix: str) -> str:
+    status = "Read report" if category.content is not None else "Report pending"
+    state = "ready" if category.content is not None else "pending"
+    return f'''<li><a class="category-link {state}" href="{prefix}reports/{category.slug}.html">
+              <span class="category-name">{escape(category.name)}</span>
+              <span class="category-status">{status}<span aria-hidden="true">↗</span></span>
+            </a></li>'''
+
+
 def render_home(clusters: list[Cluster]) -> str:
     categories = [category for cluster in clusters for category in cluster.categories]
     available = sum(category.content is not None for category in categories)
     sections = []
     for number, cluster in enumerate(clusters, 1):
-        links = []
-        for category in cluster.categories:
-            status = "Read report" if category.content is not None else "Report pending"
-            state = "ready" if category.content is not None else "pending"
-            links.append(f'''<li><a class="category-link {state}" href="reports/{category.slug}.html">
-              <span class="category-name">{escape(category.name)}</span>
-              <span class="category-status">{status}<span aria-hidden="true">↗</span></span>
-            </a></li>''')
+        links = [report_link(category, "") for category in cluster.categories]
         count = len(cluster.categories)
         category_label = "category" if count == 1 else "categories"
         sections.append(f'''<details class="cluster" id="cluster-{cluster.slug}">
@@ -251,6 +361,7 @@ def render_home(clusters: list[Cluster]) -> str:
             <span class="cluster-toggle" aria-hidden="true"></span>
           </summary>
           <ul class="category-list">{"".join(links)}</ul>
+          <p class="cluster-more"><a href="clusters/{cluster.slug}.html">Overview of {escape(cluster.name)} →</a></p>
         </details>''')
     pending = len(categories) - available
     report_status = f"{available} reports available" + (f" · {pending} pending" if pending else "")
@@ -268,10 +379,74 @@ def render_home(clusters: list[Cluster]) -> str:
         {"".join(sections)}
       </section>
     </main>'''
-    return page("Explore the collection", "Explore software engineering clusters, categories, and reports with links to GitHub repositories.", body)
+    description = (f"A field guide to code worth reading: {available} reading guides that pick open-source GitHub "
+                   "repositories by the problem they solve and explain the design decisions worth studying.")
+    structured_data = {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": SITE_NAME,
+        "url": f"{SITE_URL}/",
+        "description": description,
+        "publisher": publisher(),
+    }
+    return page(HOME_TITLE, description, body, path="", structured_data=structured_data)
 
 
-def render_category(category: Category, repository_stars: dict[str, int] | None = None) -> str:
+def render_cluster(cluster: Cluster, number: int, clusters: list[Cluster]) -> str:
+    path = f"clusters/{cluster.slug}.html"
+    trail, breadcrumb_schema = breadcrumbs([("Home", None), (cluster.name, path)], "../")
+    items = []
+    for category in cluster.categories:
+        if category.content is None:
+            continue
+        details = [f"{len(category.repositories)} repositories"] if category.repositories else []
+        if category.research_date:
+            details.append(f'Researched <time datetime="{category.research_date}">{category.research_date}</time>')
+        meta = f'<p class="report-item-meta">{" · ".join(details)}</p>' if details else ""
+        items.append(f'''<li class="report-item"><h2><a href="../reports/{category.slug}.html">{escape(category.name)}</a></h2>
+          <p>{escape(report_description(category))}</p>{meta}</li>''')
+    if not items:
+        items.append('<li class="report-item"><p>Reports for this cluster are still taking shape.</p></li>')
+    pager = []
+    if number > 1:
+        pager.append(f'<a href="{clusters[number - 2].slug}.html">← {escape(clusters[number - 2].name)}</a>')
+    if number < len(clusters):
+        pager.append(f'<a href="{clusters[number].slug}.html">{escape(clusters[number].name)} →</a>')
+    description = cluster_description(cluster)
+    body = f'''<main id="main-content" class="wrap cluster-page">
+      <header class="cluster-header">{trail}
+        <p class="eyebrow">Cluster {number:02d} of {len(clusters):02d}</p>
+        <h1 id="cluster-title">{escape(cluster.name)}</h1>
+        <p class="hero-description">{escape(description)} Each report selects repositories worth studying and explains the engineering ideas and design decisions behind them.</p>
+      </header>
+      <ul class="report-list">{"".join(items)}</ul>
+      <nav class="report-end" aria-label="Other clusters">{"".join(pager)}</nav>
+    </main>'''
+    structured_data = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "CollectionPage",
+                "name": cluster.name,
+                "description": description,
+                "url": f"{SITE_URL}/{path}",
+                "isPartOf": {"@type": "WebSite", "name": SITE_NAME, "url": f"{SITE_URL}/"},
+                "hasPart": [
+                    {"@type": "Article", "headline": category.name, "url": f"{SITE_URL}/reports/{category.slug}.html"}
+                    for category in cluster.categories if category.content is not None
+                ],
+            },
+            breadcrumb_schema,
+        ],
+    }
+    return page(f"{cluster.name}: Open-Source Codebases to Study · {SITE_NAME}", description, body,
+                prefix="../", path=path, structured_data=structured_data)
+
+
+def render_category(category: Category, cluster: Cluster, repository_stars: dict[str, int] | None = None) -> str:
+    path = f"reports/{category.slug}.html"
+    cluster_path = f"clusters/{cluster.slug}.html"
+    trail, breadcrumb_schema = breadcrumbs([("Home", None), (cluster.name, cluster_path), (category.name, path)], "../")
     if category.content is None:
         article = '<div class="empty-state"><p class="eyebrow">Report pending</p><h2>This reading list is still taking shape.</h2><p>A report for this category is not available yet. Explore the other categories in the collection.</p><a class="text-link" href="../index.html#clusters">Browse all clusters →</a></div>'
         sections = []
@@ -279,26 +454,76 @@ def render_category(category: Category, repository_stars: dict[str, int] | None 
         article, sections = render_report(category.content, repository_stars)
     contents = "".join(f'<li><a href="#{anchor}">{escape(label)}</a></li>' for anchor, label in sections)
     navigation = f'<nav aria-label="Report sections"><p class="eyebrow">In this report</p><ul>{contents}</ul></nav>' if sections else ''
+    related = [report_link(other, "../") for other in cluster.categories if other is not category and other.content is not None]
+    related_section = f'''<section class="related" aria-labelledby="related-title">
+          <h2 id="related-title">More in {escape(cluster.name)}</h2>
+          <ul class="category-list">{"".join(related)}</ul>
+        </section>''' if related else ""
     body = f'''<main id="main-content" class="wrap report-layout">
-      <aside class="report-sidebar"><a class="back-link" href="../index.html#clusters">← All clusters</a>{navigation}</aside>
+      <aside class="report-sidebar"><a class="back-link" href="../{cluster_path}">← {escape(cluster.name)}</a>{navigation}</aside>
       <article class="report" aria-labelledby="report-title">
-        <header class="report-header"><p class="eyebrow">Category report</p><h1 id="report-title">{escape(category.name)}</h1></header>
+        <header class="report-header">{trail}<p class="eyebrow">Category report</p><h1 id="report-title">{escape(category.name)}</h1></header>
         <div class="prose">{article}</div>
+        {related_section}
         <div class="report-end"><span>Continue exploring</span><a href="../index.html#clusters">Back to the collection →</a></div>
       </article>
     </main>'''
-    return page(category.name, f"Software engineering reading guide: {category.name}.", body, report=True)
+    if category.content is None:
+        return page(f"{category.name} · {SITE_NAME}", f"A reading guide to open-source {mid_sentence(category.name)} is in progress.",
+                    body, prefix="../", path=path, indexable=False)
+    description = report_description(category)
+    article_schema = {
+        "@type": "Article",
+        "headline": category.name,
+        "description": description,
+        "url": f"{SITE_URL}/{path}",
+        "mainEntityOfPage": f"{SITE_URL}/{path}",
+        "author": publisher(),
+        "publisher": publisher(),
+        "articleSection": cluster.name,
+    }
+    if category.research_date:
+        article_schema["datePublished"] = article_schema["dateModified"] = category.research_date
+    graph = [article_schema, breadcrumb_schema]
+    if category.repositories:
+        graph.append({
+            "@type": "ItemList",
+            "name": f"{category.name}: repositories to study",
+            "numberOfItems": len(category.repositories),
+            "itemListElement": [
+                {"@type": "ListItem", "position": position, "name": label, "url": url}
+                for position, (label, url) in enumerate(category.repositories, 1)
+            ],
+        })
+    return page(f"{report_title(category)} · {SITE_NAME}", description, body, prefix="../", path=path,
+                page_type="article", structured_data={"@context": "https://schema.org", "@graph": graph})
 
 
-def render_sitemap(categories: list[Category]) -> str:
+def render_not_found() -> str:
+    # Served for any missing path, so asset and page links are root-relative.
+    body = '''<main id="main-content" class="wrap not-found">
+      <div class="empty-state"><p class="eyebrow">Page not found</p><h1>This page is not in the collection.</h1>
+        <p>The link may be mistyped, or the report may have moved. Browse the clusters to find what you were looking for.</p>
+        <a class="text-link" href="/index.html#clusters">Browse all clusters →</a></div>
+    </main>'''
+    return page(f"Page not found · {SITE_NAME}", "This page is not in the Good GitHub collection.", body,
+                prefix="/", indexable=False)
+
+
+def render_sitemap(clusters: list[Cluster]) -> str:
     sitemap = ElementTree.Element("urlset", xmlns="http://www.sitemaps.org/schemas/sitemap/0.9")
-    urls = [f"{SITE_URL}/"] + [
-        f"{SITE_URL}/reports/{category.slug}.html"
-        for category in categories if category.content is not None
-    ]
-    for url in urls:
+    entries = []
+    for cluster in clusters:
+        ready = [category for category in cluster.categories if category.content is not None]
+        dates = [category.research_date for category in ready if category.research_date]
+        entries.append((f"{SITE_URL}/clusters/{cluster.slug}.html", max(dates, default=None)))
+        entries += [(f"{SITE_URL}/reports/{category.slug}.html", category.research_date) for category in ready]
+    newest = max((modified for _, modified in entries if modified), default=None)
+    for url, modified in [(f"{SITE_URL}/", newest)] + entries:
         entry = ElementTree.SubElement(sitemap, "url")
         ElementTree.SubElement(entry, "loc").text = url
+        if modified:
+            ElementTree.SubElement(entry, "lastmod").text = modified
     ElementTree.indent(sitemap, space="  ")
     return ElementTree.tostring(sitemap, encoding="utf-8", xml_declaration=True).decode("utf-8") + "\n"
 
@@ -331,12 +556,17 @@ def build(clusters_path: Path, reports_dir: Path, output_dir: Path,
     with tempfile.TemporaryDirectory(prefix=".good-github-build-", dir=output_dir.parent) as temporary:
         staging = Path(temporary) / "site"
         (staging / "reports").mkdir(parents=True)
+        (staging / "clusters").mkdir()
         (staging / "assets").mkdir()
-        shutil.copyfile(ROOT / "site_assets" / "styles.css", staging / "assets" / "styles.css")
+        for asset in ("styles.css", "favicon.svg"):
+            shutil.copyfile(ROOT / "site_assets" / asset, staging / "assets" / asset)
         (staging / "index.html").write_text(render_home(clusters), encoding="utf-8")
-        for category in categories:
-            (staging / "reports" / f"{category.slug}.html").write_text(render_category(category, repository_stars), encoding="utf-8")
-        (staging / "sitemap.xml").write_text(render_sitemap(categories), encoding="utf-8")
+        (staging / "404.html").write_text(render_not_found(), encoding="utf-8")
+        for number, cluster in enumerate(clusters, 1):
+            (staging / "clusters" / f"{cluster.slug}.html").write_text(render_cluster(cluster, number, clusters), encoding="utf-8")
+            for category in cluster.categories:
+                (staging / "reports" / f"{category.slug}.html").write_text(render_category(category, cluster, repository_stars), encoding="utf-8")
+        (staging / "sitemap.xml").write_text(render_sitemap(clusters), encoding="utf-8")
         (staging / "robots.txt").write_text(
             f"User-agent: *\nAllow: /\n\nSitemap: {SITE_URL}/sitemap.xml\n", encoding="utf-8",
         )

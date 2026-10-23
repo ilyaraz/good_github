@@ -1,6 +1,6 @@
 # AWS hosting for goodgithub.com
 
-This directory defines a private S3 origin, CloudFront, Route 53 DNS, an ACM certificate, and a scoped content-publishing IAM policy. Both `goodgithub.com` and `www.goodgithub.com` serve the site. All regional resources use **us-east-1**; CloudFront and Route 53 DNS are global.
+This directory defines a private S3 origin, CloudFront, Route 53 DNS, an ACM certificate, and a scoped content-publishing IAM policy. Both `goodgithub.com` and `www.goodgithub.com` resolve to the site; `www` redirects permanently to the apex host. All regional resources use **us-east-1**; CloudFront and Route 53 DNS are global.
 
 | Configuration | Resources |
 | --- | --- |
@@ -75,7 +75,7 @@ terraform -chdir=infra output -json deployment > infra/deployment.json
 
 The initial `publish_dns = false` setting creates the certificate validation records but does not publish apex/www website aliases. ACM requests a certificate in `us-east-1` and validates both hostnames through Route 53. Keep its CNAME records for automatic certificate renewal.
 
-The S3 bucket is private and uses its regional API endpoint, with CloudFront signing every origin request through OAC. S3 website hosting and public-read ACLs are not enabled. CloudFront redirects HTTP to HTTPS, serves `index.html` at `/`, and supports the generator's existing `/reports/<slug>.html` URLs. Both custom hostnames serve the same content; no www-to-apex redirect is configured.
+The S3 bucket is private and uses its regional API endpoint, with CloudFront signing every origin request through OAC. S3 website hosting and public-read ACLs are not enabled. CloudFront redirects HTTP to HTTPS, serves `index.html` at `/`, and supports the generator's existing `/reports/<slug>.html` URLs. A CloudFront Function on viewer requests answers `www.goodgithub.com` with a 301 redirect to the same path on `goodgithub.com`, so search engines index one URL per page; query strings are dropped. Missing objects (which the private bucket reports as 403) are served as the generated `404.html` with a 404 status.
 
 ## 4. Upload and verify the first build
 
@@ -83,11 +83,11 @@ The S3 bucket is private and uses its regional API endpoint, with CloudFront sig
 python3 infra/deploy.py
 ```
 
-The helper reads the exported deployment configuration, runs the generator tests, rebuilds `dist`, uploads assets, reports, and crawler files, uploads the homepage last, invalidates CloudFront, and checks the homepage, stylesheet, one report, sitemap, and robots file through the CloudFront hostname. It uploads only `assets/`, `reports/`, `sitemap.xml`, `robots.txt`, and `index.html`; `.good-github-site` is not uploaded.
+The helper reads the exported deployment configuration, runs the generator tests, rebuilds `dist`, uploads assets, reports, and crawler files, uploads the homepage last, invalidates CloudFront, and checks the homepage, stylesheet, favicon, one report, sitemap, and robots file through the CloudFront hostname. It uploads only `assets/`, `reports/`, `clusters/`, `404.html`, `sitemap.xml`, `robots.txt`, and `index.html`; asset content types come from `ASSET_TYPES` in `deploy.py`, and an asset with an unlisted extension stops the deployment before any upload. `.good-github-site` is not uploaded.
 
 All uploaded files use `Cache-Control: public,max-age=0,s-maxage=3600,must-revalidate`. Browsers revalidate while CloudFront can cache for an hour. Old report objects are retained so cached links continue working; removal is a separate cleanup operation. Object versioning is enabled for recovery, and both buckets reject automatic destruction.
 
-The sitemap is regenerated from the current collection and lists `https://goodgithub.com/` plus reports with content. Pending reports are omitted. `robots.txt` allows crawling and points to `https://goodgithub.com/sitemap.xml`. After deployment, submit that URL in Google Search Console's Sitemaps page; later content deployments keep the sitemap updated automatically. The publishing policy grants access to both files, so apply the Terraform policy update before first uploading them with a content-only role.
+The sitemap is regenerated from the current collection and lists `https://goodgithub.com/`, every cluster page, and reports with content, with `lastmod` taken from each report's research date. Pending reports are omitted. `robots.txt` allows crawling and points to `https://goodgithub.com/sitemap.xml`. After deployment, submit that URL in Google Search Console's Sitemaps page; later content deployments keep the sitemap updated automatically. The publishing policy grants access to these files, `404.html`, and `clusters/`, so apply the Terraform policy update before first uploading them with a content-only role. Apply before deploying the generator version that adds `404.html`, then deploy promptly: until `404.html` is uploaded, CloudFront cannot fetch its error page.
 
 The helper uses the AWS CLI's normal credentials, including `AWS_PROFILE`. For a content-only publishing role, attach the IAM policy identified by `terraform output publisher_policy_arn` to an existing role with the appropriate trust configuration. The exported `deployment.json` contains identifiers and public URLs, not credentials, so this publishing role does not need permission to read Terraform state. Terraform administration requires broader permissions than content publishing.
 
@@ -103,7 +103,7 @@ curl -I https://www.goodgithub.com/
 curl -I http://goodgithub.com/
 ```
 
-Terraform creates A and AAAA aliases for both hostnames. The HTTPS requests should return 200 and HTTP should redirect to HTTPS after DNS propagation. Keep `publish_dns = true` in the configuration for subsequent applies; setting it back to false removes those four aliases.
+Terraform creates A and AAAA aliases for both hostnames. The apex HTTPS request should return 200, `www` should return 301 to `https://goodgithub.com/`, and HTTP should redirect to HTTPS after DNS propagation. Keep `publish_dns = true` in the configuration for subsequent applies; setting it back to false removes those four aliases.
 
 ## Subsequent content updates
 
@@ -134,7 +134,7 @@ terraform -chdir=infra test
 python3 -m py_compile infra/deploy.py
 ```
 
-The Terraform tests mock the AWS provider and override the foundation-state lookup. They check bucket privacy, restricted CloudFront access, certificate/domain coverage, caching, and the DNS publishing switch without creating AWS resources. Provider downloads still require internet access. These checks do not establish bucket-name availability, AWS permissions, or DNS ownership; the real plan/apply checks those in your account.
+The Terraform tests mock the AWS provider and override the foundation-state lookup. They check bucket privacy, restricted CloudFront access, the www redirect, 404 handling, publisher paths, certificate/domain coverage, caching, and the DNS publishing switch without creating AWS resources. Provider downloads still require internet access. These checks do not establish bucket-name availability, AWS permissions, or DNS ownership; the real plan/apply checks those in your account.
 
 ## References
 

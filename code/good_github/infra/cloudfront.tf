@@ -51,6 +51,29 @@ resource "aws_cloudfront_response_headers_policy" "site" {
   }
 }
 
+# Serve every page from the apex host only, so search engines index one URL per page.
+# Query strings are dropped: the static site does not use them.
+resource "aws_cloudfront_function" "canonical_host" {
+  name    = "good-github-canonical-host"
+  runtime = "cloudfront-js-2.0"
+  comment = "Redirect www.${local.domain_name} to ${local.domain_name}"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      var host = request.headers.host ? request.headers.host.value : "";
+      if (host.toLowerCase() !== "www.${local.domain_name}") {
+        return request;
+      }
+      return {
+        statusCode: 301,
+        statusDescription: "Moved Permanently",
+        headers: { location: { value: "https://${local.domain_name}" + request.uri } }
+      };
+    }
+  EOT
+}
+
 resource "aws_cloudfront_distribution" "site" {
   comment             = "Good GitHub static reports"
   enabled             = true
@@ -75,6 +98,23 @@ resource "aws_cloudfront_distribution" "site" {
     compress                   = true
     cache_policy_id            = aws_cloudfront_cache_policy.site.id
     response_headers_policy_id = aws_cloudfront_response_headers_policy.site.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.canonical_host.arn
+    }
+  }
+
+  # The private bucket answers 403 for missing objects. Return the generated
+  # 404 page with a real 404 status so crawlers drop dead URLs.
+  dynamic "custom_error_response" {
+    for_each = toset([403, 404])
+    content {
+      error_code            = custom_error_response.value
+      response_code         = 404
+      response_page_path    = "/404.html"
+      error_caching_min_ttl = 300
+    }
   }
 
   restrictions {
